@@ -84,6 +84,8 @@ volatile struct PKE_config {
 #define ATTEMPTS_PER_VISIT   2     /* Retries per key before rotating */
 #define SEARCH_ROUNDS        3     /* run 3 round */
 
+#define WAIT_POLL_INTERVAL_MS   50U   /* Poll ignition state every 50ms */
+
 /* Key cache in RAM (loaded from EEPROM before halt) */
 uint8_t cached_key_count = 0;
 uint8_t cached_keys[MAX_KEY_NUM][16];  // 5 x 16 bytes
@@ -660,6 +662,8 @@ void RF_Remote(uint8_t level)
 
 void Handle_State_Wait(uint8_t *ign_wait)
 {
+    uint16_t elapsed_ms;               // Accumulated polling time in ms within a 1-second window
+
     UART2_SendStr("PKE_OPER_STA_WAIT in!");
 
     /* Check if Power Key is pressed; if so, immediately shut down to POWER_OFF */
@@ -677,17 +681,41 @@ void Handle_State_Wait(uint8_t *ign_wait)
         TJTW_PKE.oper_state = PKE_OPER_STA_IDLE;
         *ign_wait = 0;
         UART2_SendStr("IGN_ON PKE_OPER_STA_WAIT out!");
-    } else {
-        Delay_ms(1000);
-        (*ign_wait)++;
+        return;
+    } 
 
-        if (*ign_wait >= IGN_TIMEOUT_S) {
-            /* Timeout reached: return to POWER_OFF immediately on the 10th second */
+    elapsed_ms = 0;
+    
+    /* Poll for key/ignition events in slices across a 1-second window to maintain responsiveness */
+    while (elapsed_ms < 1000U) {
+        Delay_ms(WAIT_POLL_INTERVAL_MS);
+        elapsed_ms += WAIT_POLL_INTERVAL_MS;
+
+        if (TJTW_PKE.power_event_flag) {
+            TJTW_PKE.power_event_flag = 0;
+            motor_turn_off();
+            BR_LIGHT_OFF();
             TJTW_PKE.oper_state = PKE_OPER_STA_POWER_OFF;
             *ign_wait = 0;
-            motor_turn_off();
-            UART2_SendStr("PKE_OPER_STA_WAIT out!");
+            return;
         }
+
+        if (IGN_IS_ON()) {
+            TJTW_PKE.oper_state = PKE_OPER_STA_IDLE;
+            *ign_wait = 0;
+            UART2_SendStr("IGN_ON PKE_OPER_STA_WAIT out!");
+            return;
+        }
+    }
+
+    (*ign_wait)++;
+
+    if (*ign_wait >= IGN_TIMEOUT_S) {
+        /* Timeout reached: return to POWER_OFF immediately on the 10th second */
+        TJTW_PKE.oper_state = PKE_OPER_STA_POWER_OFF;
+        *ign_wait = 0;
+        motor_turn_off();
+        UART2_SendStr("PKE_OPER_STA_WAIT out!");
     }
 }
 
